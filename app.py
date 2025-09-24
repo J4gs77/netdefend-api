@@ -24,12 +24,10 @@ if not API_KEY:
 def get_domain(url: str) -> str:
     """Extracts the network location (domain) from a URL."""
     try:
-        # Assume http if no scheme is present
         if not re.match(r'http[s]?://', url):
             url = 'http://' + url
         return urlparse(url).netloc.lower()
     except Exception:
-        # Fallback for malformed URLs
         return url.lower()
 
 # ========== Data Loading (Optimized) ==========
@@ -39,16 +37,11 @@ def load_kaggle_domains():
     for high-performance lookups. This runs only once at startup.
     """
     try:
-        # Direct download link for the Google Drive file
         drive_url = "https://drive.google.com/uc?id=13lsygqMVSnrstBRGHjEC1IycsALYD8WJ&export=download"
         df = pd.read_csv(drive_url)
         df.columns = df.columns.str.lower()
-        
         bad_urls = df[df['label'].str.lower() == 'bad']['url']
-        
-        # REFACTORED: Convert all URLs to domains and store in a set for O(1) lookups
         phishing_domains = {get_domain(url) for url in bad_urls.dropna()}
-        
         logging.info(f"Loaded {len(phishing_domains)} unique phishing DOMAINS from dataset.")
         return phishing_domains
     except Exception as e:
@@ -60,10 +53,7 @@ KAGGLE_PHISHING_DOMAINS = load_kaggle_domains()
 
 # ========== Phishing Check Functions ==========
 def is_in_kaggle_dataset(url: str) -> bool:
-    """
-    REFACTORED: Checks if the URL's domain is in the pre-loaded set.
-    This is now a highly efficient O(1) operation.
-    """
+    """Checks if the URL's domain is in the pre-loaded set."""
     domain = get_domain(url)
     return domain in KAGGLE_PHISHING_DOMAINS
 
@@ -71,7 +61,6 @@ def check_safe_browsing_api(url: str) -> bool:
     """Checks the URL against Google's Safe Browsing API."""
     if not API_KEY:
         return False
-        
     payload = {
         "client": {"clientId": "netdefend-extension", "clientVersion": "1.0.0"},
         "threatInfo": {
@@ -86,7 +75,7 @@ def check_safe_browsing_api(url: str) -> bool:
             f"https://safebrowsing.googleapis.com/v4/threatMatches:find?key={API_KEY}",
             json=payload
         )
-        response.raise_for_status() # Raise an exception for bad status codes (4xx or 5xx)
+        response.raise_for_status()
         data = response.json()
         return bool(data.get("matches"))
     except requests.exceptions.RequestException as e:
@@ -95,25 +84,41 @@ def check_safe_browsing_api(url: str) -> bool:
 
 def is_suspicious_url(url: str) -> bool:
     """
-    IMPROVED HEURISTICS: Uses more reliable patterns to detect suspicious URLs
-    and reduce false positives from the previous version.
+    FINAL HEURISTICS: Detects suspicious URLs using lookalike characters, 
+    keyword patterns, and repeated character checks.
     """
     domain = get_domain(url)
     
-    # 1. IP Address in domain: URLs using a raw IP are highly suspicious.
+    # Check for repeated characters (e.g., faceboook)
+    if re.search(r'(.)\1\1', domain):
+        return True
+
+    # Check for a number immediately after a known keyword
+    keyword_patterns = ['vtop'] 
+    for keyword in keyword_patterns:
+        if re.search(f"{keyword}\\d+", domain):
+            return True
+
+    # Check for lookalike characters (homoglyphs)
+    lookalike_chars = {'0': 'o', '1': 'l', '5': 's'}
+    for char in domain:
+        if char in lookalike_chars:
+            return True
+
+    # Check for IP Address in domain
     ip_regex = r'^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$'
     if re.match(ip_regex, domain):
         return True
         
-    # 2. '@' symbol in URL: Often used to obscure the actual domain.
+    # Check for '@' symbol in URL
     if '@' in url:
         return True
         
-    # 3. Excessive subdomains: Phishers often use many subdomains. e.g., login.secure.mybank.com.scam.net
+    # Check for excessive subdomains
     if domain.count('.') > 3:
         return True
         
-    # 4. Excessive hyphens in domain: Another common phishing pattern.
+    # Check for excessive hyphens in domain
     if domain.count('-') > 2:
         return True
         
@@ -125,12 +130,9 @@ app = FastAPI(
     description="An API to detect potentially malicious or phishing URLs."
 )
 
-# --- IMPORTANT ---
-# For production, you MUST restrict the origins to your Chrome extension's ID.
-# Example: allow_origins=["chrome-extension://<your-extension-id-here>"]
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # WARNING: Permissive for testing only.
+    allow_origins=["*"],  # WARNING: Permissive for testing. Restrict in production.
     allow_credentials=True,
     allow_methods=["POST"],
     allow_headers=["*"],
@@ -150,15 +152,14 @@ async def check_url_endpoint(item: URLItem):
 
     reasons = []
     
-    # Perform checks
-    if check_safe_browsing_api(url):
-        reasons.append("Flagged by Google Safe Browsing")
+    if is_suspicious_url(url):
+        reasons.append("URL structure matches suspicious patterns")
         
     if is_in_kaggle_dataset(url):
         reasons.append("Domain found in threat dataset")
         
-    if is_suspicious_url(url):
-        reasons.append("URL structure matches suspicious patterns")
+    if check_safe_browsing_api(url):
+        reasons.append("Flagged by Google Safe Browsing")
 
     is_phishing = bool(reasons)
     
