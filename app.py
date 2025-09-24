@@ -84,11 +84,17 @@ def check_safe_browsing_api(url: str) -> bool:
 
 def is_suspicious_url(url: str) -> bool:
     """
-    FINAL HEURISTICS: Detects suspicious URLs using lookalike characters, 
-    keyword patterns, and repeated character checks.
+    FINAL HEURISTICS: Detects suspicious URLs using multiple advanced checks.
     """
     domain = get_domain(url)
     
+    # --- NEW: Check for mixed letters/numbers in common brand names ---
+    brand_keywords = ['google', 'facebook', 'amazon', 'paypal', 'apple', 'microsoft', 'instagram', 'chase', 'netflix']
+    for brand in brand_keywords:
+        if brand in domain and brand + '.' not in domain:
+            if any(char.isdigit() for char in domain):
+                 return True
+
     # Check for repeated characters (e.g., faceboook)
     if re.search(r'(.)\1\1', domain):
         return True
@@ -106,8 +112,7 @@ def is_suspicious_url(url: str) -> bool:
             return True
 
     # Check for IP Address in domain
-    ip_regex = r'^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$'
-    if re.match(ip_regex, domain):
+    if re.match(r'^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$', domain):
         return True
         
     # Check for '@' symbol in URL
