@@ -88,28 +88,18 @@ def is_suspicious_url(url: str) -> bool:
     """
     domain = get_domain(url)
     
-    # --- NEW: Check for mixed letters/numbers in common brand names ---
-    brand_keywords = ['google', 'facebook', 'amazon', 'paypal', 'apple', 'microsoft', 'instagram', 'chase', 'netflix']
+    # CORRECTED: Check for mixed letters/numbers in common brand names
+    brand_keywords = ['google', 'facebook', 'amazon', 'paypal', 'apple', 'microsoft', 'instagram', 'chase', 'netflix', 'vtop']
     for brand in brand_keywords:
-        if brand in domain and brand + '.' not in domain:
-            if any(char.isdigit() for char in domain):
-                 return True
+        # This regex looks for patterns where the brand name is directly altered with numbers or lookalikes.
+        pattern = brand.replace('o', '[o0]').replace('l', '[l1]').replace('i', '[i1]').replace('s', '[s5]')
+        if brand in domain and not domain.startswith(brand + '.'):
+             if re.search(r'\d', domain) and re.search(pattern, domain):
+                return True
 
     # Check for repeated characters (e.g., faceboook)
     if re.search(r'(.)\1\1', domain):
         return True
-
-    # Check for a number immediately after a known keyword
-    keyword_patterns = ['vtop'] 
-    for keyword in keyword_patterns:
-        if re.search(f"{keyword}\\d+", domain):
-            return True
-
-    # Check for lookalike characters (homoglyphs)
-    lookalike_chars = {'0': 'o', '1': 'l', '5': 's'}
-    for char in domain:
-        if char in lookalike_chars:
-            return True
 
     # Check for IP Address in domain
     if re.match(r'^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$', domain):
