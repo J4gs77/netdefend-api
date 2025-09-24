@@ -20,13 +20,25 @@ API_KEY = os.getenv("GOOGLE_SAFE_BROWSING_KEY", "")
 if not API_KEY:
     logging.warning("Google Safe Browsing API key not found. This check will be disabled.")
 
+# A failsafe whitelist for major domains that should never be flagged.
+WHITELISTED_DOMAINS = {
+    'google.com', 'youtube.com', 'facebook.com', 'wikipedia.org', 'amazon.com',
+    'apple.com', 'microsoft.com', 'netflix.com', 'twitter.com', 'linkedin.com',
+    'instagram.com', 'reddit.com'
+}
+
 # ========== Helpers ==========
 def get_domain(url: str) -> str:
     """Extracts the network location (domain) from a URL."""
     try:
         if not re.match(r'http[s]?://', url):
             url = 'http://' + url
-        return urlparse(url).netloc.lower()
+        parsed_url = urlparse(url)
+        # Remove 'www.' from the beginning if it exists
+        netloc = parsed_url.netloc.lower()
+        if netloc.startswith('www.'):
+            return netloc[4:]
+        return netloc
     except Exception:
         return url.lower()
 
@@ -41,6 +53,7 @@ def load_kaggle_domains():
         df = pd.read_csv(drive_url)
         df.columns = df.columns.str.lower()
         bad_urls = df[df['label'].str.lower() == 'bad']['url']
+        # Apply the same get_domain logic to the dataset
         phishing_domains = {get_domain(url) for url in bad_urls.dropna()}
         logging.info(f"Loaded {len(phishing_domains)} unique phishing DOMAINS from dataset.")
         return phishing_domains
@@ -53,7 +66,7 @@ KAGGLE_PHISHING_DOMAINS = load_kaggle_domains()
 
 # ========== Phishing Check Functions ==========
 def is_in_kaggle_dataset(url: str) -> bool:
-    """Checks if the URL's domain is in the pre-loaded set."""
+    """Checks if the URL's exact domain is in the pre-loaded set."""
     domain = get_domain(url)
     return domain in KAGGLE_PHISHING_DOMAINS
 
@@ -73,7 +86,8 @@ def check_safe_browsing_api(url: str) -> bool:
     try:
         response = requests.post(
             f"https://safebrowsing.googleapis.com/v4/threatMatches:find?key={API_KEY}",
-            json=payload
+            json=payload,
+            timeout=5 # Add a timeout to prevent long waits
         )
         response.raise_for_status()
         data = response.json()
@@ -84,18 +98,20 @@ def check_safe_browsing_api(url: str) -> bool:
 
 def is_suspicious_url(url: str) -> bool:
     """
-    FINAL HEURISTICS: Detects suspicious URLs using multiple advanced checks.
+    FINAL HEURISTICS (Corrected): Detects suspicious URLs with more reliable checks
+    to reduce false positives.
     """
     domain = get_domain(url)
     
-    # CORRECTED: Check for mixed letters/numbers in common brand names
-    brand_keywords = ['google', 'facebook', 'amazon', 'paypal', 'apple', 'microsoft', 'instagram', 'chase', 'netflix', 'vtop']
-    for brand in brand_keywords:
-        # This regex looks for patterns where the brand name is directly altered with numbers or lookalikes.
-        pattern = brand.replace('o', '[o0]').replace('l', '[l1]').replace('i', '[i1]').replace('s', '[s5]')
-        if brand in domain and not domain.startswith(brand + '.'):
-             if re.search(r'\d', domain) and re.search(pattern, domain):
-                return True
+    # Check for lookalike characters (homoglyphs) combined with a brand keyword
+    lookalike_chars = {'0': 'o', '1': 'l', 'i': 'l', '5': 's'}
+    temp_domain = domain
+    for num, letter in lookalike_chars.items():
+        temp_domain = temp_domain.replace(num, letter)
+    
+    brand_keywords = ['google', 'facebook', 'amazon', 'paypal', 'apple', 'microsoft']
+    if any(brand in temp_domain for brand in brand_keywords) and domain not in WHITELISTED_DOMAINS:
+        return True
 
     # Check for repeated characters (e.g., faceboook)
     if re.search(r'(.)\1\1', domain):
@@ -109,12 +125,12 @@ def is_suspicious_url(url: str) -> bool:
     if '@' in url:
         return True
         
-    # Check for excessive subdomains
-    if domain.count('.') > 3:
+    # Check for excessive subdomains (more conservative)
+    if domain.count('.') > 4:
         return True
         
-    # Check for excessive hyphens in domain
-    if domain.count('-') > 2:
+    # Check for excessive hyphens (more conservative)
+    if domain.count('-') > 3:
         return True
         
     return False
@@ -127,7 +143,7 @@ app = FastAPI(
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # WARNING: Permissive for testing. Restrict in production.
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["POST"],
     allow_headers=["*"],
@@ -144,6 +160,16 @@ async def check_url_endpoint(item: URLItem):
     url = item.url.strip()
     if not url:
         return {"error": "No URL provided", "is_phishing": False}
+
+    domain = get_domain(url)
+    
+    # 1. Check against the failsafe whitelist first.
+    if domain in WHITELISTED_DOMAINS:
+        return {
+            "url": url,
+            "is_phishing": False,
+            "reasons": ["Domain is on the global whitelist"]
+        }
 
     reasons = []
     
